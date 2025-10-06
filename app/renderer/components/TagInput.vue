@@ -3,7 +3,7 @@
     <n-tag
       v-for="(tag, index) in modelValue"
       :key="`${tag}-${index}`"
-      closable
+      :closable="!disabled"
       type="info"
       size="small"
       @close="removeTag(index)"
@@ -46,6 +46,10 @@ watch(
 );
 
 function addTag() {
+  if (props.disabled) {
+    inputValue.value = '';
+    return;
+  }
   if (!inputValue.value.trim()) return;
   const next = Array.from(new Set([...props.modelValue, inputValue.value.trim()]));
   emit('update:modelValue', next);
@@ -53,12 +57,14 @@ function addTag() {
 }
 
 function removeTag(index: number) {
+  if (props.disabled) return;
   const next = [...props.modelValue];
   next.splice(index, 1);
   emit('update:modelValue', next);
 }
 
 function handleBlur() {
+  if (props.disabled) return;
   addTag();
 }
 </script>

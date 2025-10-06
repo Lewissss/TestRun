@@ -28,7 +28,9 @@ interface ConvertRecordingResult {
   blockVersion: number;
 }
 
-interface BlockBuildResult {
+interface SingleBlockBuild {
+  title: string;
+  description?: string;
   actions: BlockAction[];
   params: BlockParamInput[];
   bindings: Record<string, unknown>;
@@ -51,31 +53,50 @@ export async function convertRecordingToTest(options: ConvertRecordingOptions): 
   const blockTitle = options.blockTitle?.trim() || recording.name || 'Recording Flow';
   const testTitle = options.testTitle?.trim() || `${recording.name ?? 'Recording'} Test`;
 
-  const normalizedSteps = recording.steps.map((step) => normalizeStep(step, recording.id)).filter(Boolean) as Step[];
+  const normalizedSteps = recording.steps
+    .map((step) => normalizeStep(step, recording.id))
+    .filter(Boolean) as Step[];
 
-  const build = buildBlockFromRecording(normalizedSteps, {
+  const builtBlocks = buildBlocksFromRecording(normalizedSteps, {
     includeScreenshots,
     recordingId: recording.id,
+    baseTitle: blockTitle,
   });
 
-  const block = await createBlock({
-    id: nanoid(),
-    title: blockTitle,
-    description: recording.description ?? undefined,
-    block: build.actions as unknown as Prisma.JsonValue,
-    params: build.params,
-    tagNames: options.tagNames,
-  });
+  const createdBlocks: Array<{ id: string; version: number; bindings: Record<string, unknown>; assets: Map<string, string> }>
+    = [];
+
+  if (!builtBlocks.length) {
+    throw new Error('Recording does not contain any executable steps.');
+  }
+
+  for (const blockData of builtBlocks) {
+    const serializedActions = JSON.parse(JSON.stringify(blockData.actions)) as Prisma.JsonValue;
+    const created = await createBlock({
+      id: nanoid(),
+      title: blockData.title,
+      description: blockData.description,
+      block: serializedActions,
+      params: blockData.params,
+      tagNames: options.tagNames,
+    });
+    createdBlocks.push({
+      id: created.id,
+      version: created.version,
+      bindings: blockData.bindings,
+      assets: blockData.assets,
+    });
+  }
 
   const result = await composeTestCase({
     title: testTitle,
     blocks: [
-      {
-        kind: 'ui',
+      ...createdBlocks.map((block) => ({
+        kind: 'ui' as const,
         blockId: block.id,
         version: block.version,
-        bindings: build.bindings,
-      },
+        bindings: block.bindings,
+      })),
     ],
     baseUrl: recording.baseUrl,
     viewport: {
@@ -88,15 +109,17 @@ export async function convertRecordingToTest(options: ConvertRecordingOptions): 
     environmentId: options.environmentId,
   });
 
-  if (includeScreenshots && build.assets.size) {
+  if (includeScreenshots) {
     const snapshotDir = join(process.cwd(), result.snapshotDir);
     await mkdir(snapshotDir, { recursive: true });
-    for (const [filename, source] of build.assets) {
-      try {
-        await access(source);
-        await copyFile(source, join(snapshotDir, filename));
-      } catch (error) {
-        console.warn(`Failed to copy screenshot ${source}:`, error);
+    for (const block of createdBlocks) {
+      for (const [filename, source] of block.assets) {
+        try {
+          await access(source);
+          await copyFile(source, join(snapshotDir, filename));
+        } catch (error) {
+          console.warn(`Failed to copy screenshot ${source}:`, error);
+        }
       }
     }
   }
@@ -105,26 +128,27 @@ export async function convertRecordingToTest(options: ConvertRecordingOptions): 
     testId: result.testId,
     filePath: result.filePath,
     snapshotDir: result.snapshotDir,
-    blockId: block.id,
-    blockVersion: block.version,
+    blockId: createdBlocks[0]?.id ?? '',
+    blockVersion: createdBlocks[0]?.version ?? 1,
   };
 }
 
-function buildBlockFromRecording(steps: Step[], options: { includeScreenshots: boolean; recordingId: string }): BlockBuildResult {
-  const actions: BlockAction[] = [];
-  const params: BlockParamInput[] = [];
-  const bindings: Record<string, unknown> = {};
-  const assets = new Map<string, string>();
-  const paramByKey = new Map<string, string>();
+function buildBlocksFromRecording(
+  steps: Step[],
+  options: { includeScreenshots: boolean; recordingId: string; baseTitle: string },
+): SingleBlockBuild[] {
+  const result: SingleBlockBuild[] = [];
   let paramCounter = 1;
 
-  const includeScreenshots = options.includeScreenshots;
+  steps.forEach((step, idx) => {
+    if (step.deleted) return;
 
-  for (const step of steps) {
-    if (step.deleted) continue;
-
-    const screenshotName = includeScreenshots && step.screenshot ? basename(step.screenshot) : undefined;
-    if (includeScreenshots && step.screenshot && screenshotName) {
+    const actions: BlockAction[] = [];
+    const params: BlockParamInput[] = [];
+    const bindings: Record<string, unknown> = {};
+    const assets = new Map<string, string>();
+    const screenshotName = options.includeScreenshots && step.screenshot ? basename(step.screenshot) : undefined;
+    if (options.includeScreenshots && step.screenshot && screenshotName) {
       assets.set(screenshotName, join(DATA_ROOT, step.screenshot));
     }
 
@@ -137,35 +161,28 @@ function buildBlockFromRecording(steps: Step[], options: { includeScreenshots: b
         }));
         break;
       case 'click':
-      case 'submit': {
-        const selector = resolveSelector(step);
+      case 'submit':
         actions.push(stripUndefined({
           action: step.type === 'submit' ? 'submit' : 'click',
-          selector,
+          selector: resolveSelector(step),
           screenshot: screenshotName,
         }));
         break;
-      }
       case 'type': {
         const selector = resolveSelector(step);
         const hint = extractPrimaryHint(step.paramHints);
-        const key = hint?.selector ?? selector ?? `step-${step.index}`;
-        let paramName = key ? paramByKey.get(key) : undefined;
-        if (!paramName) {
-          paramName = deriveParamName(hint, paramCounter++);
-          paramByKey.set(key ?? paramName, paramName);
-          params.push({
-            name: paramName,
-            label: hint?.fieldLabel ?? step.name ?? step.customName ?? paramName,
-            type: hint?.kind === 'secret' || hint?.mask ? 'secret' : 'string',
-            required: true,
-            defaultValue: hint?.sampleValue ?? '',
-          });
-          if (hint?.sampleValue !== undefined) {
-            bindings[paramName] = hint.sampleValue;
-          } else {
-            bindings[paramName] = '';
-          }
+        const paramName = deriveParamName(hint, paramCounter++);
+        params.push({
+          name: paramName,
+          label: hint?.fieldLabel ?? step.name ?? step.customName ?? paramName,
+          type: hint?.kind === 'secret' || hint?.mask ? 'secret' : 'string',
+          required: true,
+          defaultValue: hint?.sampleValue ?? '',
+        });
+        if (hint?.sampleValue !== undefined) {
+          bindings[paramName] = hint.sampleValue;
+        } else {
+          bindings[paramName] = '';
         }
         actions.push(stripUndefined({
           action: 'type',
@@ -190,9 +207,18 @@ function buildBlockFromRecording(steps: Step[], options: { includeScreenshots: b
         }));
         break;
     }
-  }
 
-  return { actions, params, bindings, assets };
+    result.push({
+      title: `${options.baseTitle} – Step ${idx + 1}`,
+      description: step.customName ?? step.name ?? step.type,
+      actions,
+      params,
+      bindings,
+      assets,
+    });
+  });
+
+  return result;
 }
 
 function resolveSelector(step: Step): string {
