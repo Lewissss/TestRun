@@ -1,9 +1,11 @@
 <template>
-  <div class="flex h-full bg-transparent text-surface-100">
-    <aside class="w-80 border-r border-ink-700 bg-ink-800/80 p-4">
-      <h2 class="text-lg font-semibold text-surface-50">Steps</h2>
-      <n-skeleton v-if="isLoading" text :repeat="4" class="mt-4" />
-      <div v-else class="mt-4 space-y-3 overflow-y-auto pr-2">
+  <div class="flex h-full min-h-0 bg-transparent text-surface-100">
+    <aside class="flex w-80 flex-col border-r border-ink-700 bg-ink-800/80 min-h-0">
+      <div class="p-4">
+        <h2 class="text-lg font-semibold text-surface-50">Steps</h2>
+        <n-skeleton v-if="isLoading" text :repeat="4" class="mt-4" />
+      </div>
+      <div v-if="!isLoading" class="flex-1 overflow-y-auto px-4 pb-6 space-y-3 min-h-0">
         <StepCard
           v-for="step in steps"
           :key="step.id"
@@ -31,7 +33,8 @@
         </StepCard>
       </div>
     </aside>
-    <section class="flex-1 overflow-auto p-6">
+
+    <section class="flex flex-1 flex-col overflow-hidden p-6 min-h-0">
       <header class="flex items-center justify-between gap-4">
         <div>
           <h1 class="text-2xl font-semibold text-surface-50">Recording Editor</h1>
@@ -50,14 +53,23 @@
           <n-button type="primary">Open Trace</n-button>
         </div>
       </header>
-      <div class="mt-6 rounded-xl border border-ink-700 bg-ink-800/60 p-6 text-center text-surface-300">
-        <img
-          v-if="selectedScreenshot"
-          :src="selectedScreenshot"
-          alt="Step screenshot"
-          class="mx-auto max-h-[520px] w-auto rounded border border-ink-700 object-contain"
-        />
-        <span v-else>Screenshot preview placeholder</span>
+
+      <div class="mt-6 flex-1 overflow-hidden min-h-0">
+        <div class="flex h-full rounded-xl border border-ink-700 bg-ink-800/60 p-2 overflow-hidden">
+          <div
+            v-if="selectedScreenshot"
+            class="flex h-full w-full items-center justify-center overflow-hidden"
+          >
+            <img
+              :src="selectedScreenshot"
+              alt="Step screenshot"
+              class="max-h-full max-w-full rounded border border-ink-700 object-contain"
+            />
+          </div>
+          <div v-else class="flex h-full w-full items-center justify-center text-surface-300">
+            Screenshot preview placeholder
+          </div>
+        </div>
       </div>
     </section>
   </div>
@@ -198,18 +210,13 @@ async function summarizeSteps() {
       message.error(response.message ?? 'Failed to summarize steps.');
       return;
     }
-    let applied = 0;
-    response.steps?.forEach((item) => {
+    const summaries = response.steps ?? [];
+    summaries.forEach((item) => {
       recordings.updateStep(item.stepId, { customName: item.label });
-      applied += 1;
     });
-    if (applied) {
-      message.success(`Applied AI labels to ${applied} step${applied === 1 ? '' : 's'}.`);
-    } else {
-      message.warning('No AI summaries were returned.');
-    }
+    message.success('Step summaries applied.');
   } catch (error) {
-    console.warn('Summarize steps failed', error);
+    console.warn('Summaries failed', error);
     message.error('Unable to summarize steps.');
   }
 }

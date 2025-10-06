@@ -18,9 +18,9 @@ yarn.lock
 /playwright/.cache/
 /.playwright-cache/
 
-*.prisma
 /.serena/
 .env
+*.db
 
 # Logs & temp files
 *.log

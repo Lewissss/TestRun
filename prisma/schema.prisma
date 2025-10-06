@@ -1,0 +1,169 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Recording {
+  id           String   @id @default(cuid())
+  name         String
+  description  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  baseUrl      String
+  viewportW    Int      @default(1366)
+  viewportH    Int      @default(900)
+  scale        Int      @default(1)
+  traceZipPath String
+  flowLogPath  String
+  steps        Step[]
+  tags         Tag[]    @relation("RecordingTags")
+}
+
+model Step {
+  id           String   @id @default(cuid())
+  recordingId  String
+  index        Int
+  type         String
+  route        String?
+  selector     String?
+  role         String?
+  name         String?
+  testid       String?
+  apiHints     Json?
+  screenshot   String
+  customName   String?
+  deleted      Boolean  @default(false)
+  paramHints   Json?
+
+  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+}
+
+model StepTemplate {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  version     Int       @default(1)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  block       Json
+  params      Param[]   @relation("StepTemplateParams")
+  tags        Tag[]     @relation("BlockTags")
+}
+
+model Param {
+  id             String  @id @default(cuid())
+  stepTemplateId String?
+  apiBlockId     String?
+  name           String
+  label          String?
+  type           String
+  required       Boolean @default(true)
+  defaultValue   String?
+  enumValues     String?
+
+  template StepTemplate? @relation("StepTemplateParams", fields: [stepTemplateId], references: [id], onDelete: Cascade)
+  apiBlock ApiBlock?     @relation("ApiBlockParams", fields: [apiBlockId], references: [id], onDelete: Cascade)
+}
+
+model TestCase {
+  id          String   @id @default(cuid())
+  title       String
+  filePath    String
+  createdAt   DateTime @default(now())
+  composition Json
+  snapshotDir String
+  tags        Tag[]    @relation("TestTags")
+  environmentId String?
+  environment   Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+}
+
+model DataSet {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  bindings    Json
+  tags        Tag[]   @relation("DataSetTags")
+}
+
+model Tag {
+  id          String         @id @default(cuid())
+  name        String         @unique
+  recordings  Recording[]    @relation("RecordingTags")
+  tests       TestCase[]     @relation("TestTags")
+  blocks      StepTemplate[] @relation("BlockTags")
+  datasets    DataSet[]      @relation("DataSetTags")
+  apiSessions ApiSession[]   @relation("ApiSessionTags")
+  apiBlocks   ApiBlock[]     @relation("ApiBlockTags")
+}
+
+model RunResult {
+  id          String   @id @default(cuid())
+  status      String
+  testIds     Json
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+  logPath     String?
+  summaryPath String?
+  summaryJsonPath String?
+}
+
+model ApiSession {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  baseUrl     String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  requests    ApiRequest[]
+  tags        Tag[]        @relation("ApiSessionTags")
+}
+
+model ApiRequest {
+  id             String   @id @default(cuid())
+  apiSessionId   String
+  name           String
+  method         String
+  url            String
+  headers        Json?
+  query          Json?
+  bodyMode       String?
+  body           String?
+  auth           Json?
+  preScripts     String?
+  postScripts    String?
+  assertions     Json?
+  lastStatus     Int?
+  lastLatencyMs  Int?
+  lastRespHeaders Json?
+  lastRespBody   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  session ApiSession @relation(fields: [apiSessionId], references: [id], onDelete: Cascade)
+}
+
+model ApiBlock {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  actions     Json
+  params      Param[]  @relation("ApiBlockParams")
+  tags        Tag[]    @relation("ApiBlockTags")
+}
+
+model Environment {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  variables   Json
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tests       TestCase[]
+}

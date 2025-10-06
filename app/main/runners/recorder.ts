@@ -131,12 +131,14 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
           ts: Date.now(),
           pageUrl: href,
         };
-        const binding = globalObj?.[bindingName];
-        if (typeof binding === 'function') {
-          binding(payload).catch(() => {
-            /* ignore send errors */
-          });
-        }
+        globalObj.setTimeout(() => {
+          const binding = globalObj?.[bindingName];
+          if (typeof binding === 'function') {
+            binding(payload).catch(() => {
+              /* ignore send errors */
+            });
+          }
+        }, 16);
       };
 
       const getElementKey = (element: any) => {
@@ -278,92 +280,102 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
         return Boolean(textualInputTypes[type]);
       };
 
-      doc.addEventListener(
-        'click',
-        (event: any) => {
-          const target = event?.target ?? null;
-          if (!target) return;
-          const descriptor = serializeElement(target);
-          send('click', descriptor, {
-            button: typeof event?.button === 'number' ? event.button : 0,
-            detail: typeof event?.detail === 'number' ? event.detail : 0,
-            clientX: typeof event?.clientX === 'number' ? event.clientX : null,
-            clientY: typeof event?.clientY === 'number' ? event.clientY : null,
-          });
-        },
-        { capture: true },
-      );
-
-      doc.addEventListener(
-        'change',
-        (event: any) => {
-          const target = event?.target ?? null;
-          if (!target) return;
-          const descriptor = serializeElement(target);
-          let meta: Record<string, unknown> | undefined;
-          if (isTextualInput(target)) {
-            const value = typeof target.value === 'string' ? target.value : '';
-            const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
-            meta = {
-              value,
-              length: value.length,
-              masked: type === 'password',
-            };
+      const resolveClickableTarget = (node: any): any => {
+        if (!node || typeof node !== 'object') return node;
+        if (typeof node.closest === 'function') {
+          const labelledControl = node.closest('label');
+          if (labelledControl && typeof labelledControl.querySelector === 'function') {
+            const control = labelledControl.querySelector('input,select,textarea,button');
+            if (control) return control;
           }
-          send('change', descriptor, meta);
-        },
-        { capture: true },
-      );
+        }
+        const tag = typeof node.tagName === 'string' ? node.tagName.toLowerCase() : '';
+        if (tag === 'input' || tag === 'button' || tag === 'a' || tag === 'select' || tag === 'textarea') {
+          return node;
+        }
+        if (typeof node.querySelector === 'function') {
+          const candidate = node.querySelector('input,button,select,textarea,a');
+          if (candidate) return candidate;
+        }
+        if (node.firstElementChild) {
+          let child = node.firstElementChild as any;
+          while (child) {
+            const resolved = resolveClickableTarget(child);
+            if (resolved) return resolved;
+            child = child.nextElementSibling;
+          }
+        }
+        return node;
+      };
 
-      doc.addEventListener(
-        'input',
-        (event: any) => {
-          const target = event?.target ?? null;
-          if (!isTextualInput(target)) return;
-          const descriptor = serializeElement(target);
+      doc.addEventListener('click', (event: any) => {
+        const rawTarget = event?.target ?? null;
+        if (!rawTarget) return;
+        const target = resolveClickableTarget(rawTarget);
+        if (!target) return;
+        const descriptor = serializeElement(target);
+        send('click', descriptor, {
+          button: typeof event?.button === 'number' ? event.button : 0,
+          detail: typeof event?.detail === 'number' ? event.detail : 0,
+          clientX: typeof event?.clientX === 'number' ? event.clientX : null,
+          clientY: typeof event?.clientY === 'number' ? event.clientY : null,
+        });
+      });
+
+      doc.addEventListener('change', (event: any) => {
+        const target = event?.target ?? null;
+        if (!target) return;
+        const descriptor = serializeElement(target);
+        let meta: Record<string, unknown> | undefined;
+        if (isTextualInput(target)) {
           const value = typeof target.value === 'string' ? target.value : '';
-          const key = getElementKey(target);
-          const existing = pendingInputs.get(key);
-          if (existing) globalObj.clearTimeout(existing);
-          const timer = globalObj.setTimeout(() => {
-            pendingInputs.delete(key);
-            const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
-            const inputType = typeof event?.inputType === 'string' ? event.inputType : null;
-            send('input', descriptor, {
-              value,
-              length: value.length,
-              masked: type === 'password',
-              inputType,
-            });
-          }, inputDebounce);
-          pendingInputs.set(key, timer);
-        },
-        { capture: true },
-      );
+          const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
+          meta = {
+            value,
+            length: value.length,
+            masked: type === 'password',
+          };
+        }
+        send('change', descriptor, meta);
+      });
 
-      doc.addEventListener(
-        'submit',
-        (event: any) => {
-          const target = event?.target ?? null;
-          if (!target) return;
-          const descriptor = serializeElement(target);
-          send('submit', descriptor, {});
-        },
-        { capture: true },
-      );
+      doc.addEventListener('input', (event: any) => {
+        const target = event?.target ?? null;
+        if (!isTextualInput(target)) return;
+        const descriptor = serializeElement(target);
+        const value = typeof target.value === 'string' ? target.value : '';
+        const key = getElementKey(target);
+        const existing = pendingInputs.get(key);
+        if (existing) globalObj.clearTimeout(existing);
+        const timer = globalObj.setTimeout(() => {
+          pendingInputs.delete(key);
+          const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
+          const inputType = typeof event?.inputType === 'string' ? event.inputType : null;
+          send('input', descriptor, {
+            value,
+            length: value.length,
+            masked: type === 'password',
+            inputType,
+          });
+        }, inputDebounce);
+        pendingInputs.set(key, timer);
+      });
 
-      doc.addEventListener(
-        'keydown',
-        (event: any) => {
-          const key = typeof event?.key === 'string' ? event.key : '';
-          if (key.toLowerCase() !== 'enter') return;
-          const target = event?.target ?? null;
-          if (!target) return;
-          const descriptor = serializeElement(target);
-          send('keydown', descriptor, { key });
-        },
-        { capture: true },
-      );
+      doc.addEventListener('submit', (event: any) => {
+        const target = event?.target ?? null;
+        if (!target) return;
+        const descriptor = serializeElement(target);
+        send('submit', descriptor, {});
+      });
+
+      doc.addEventListener('keydown', (event: any) => {
+        const key = typeof event?.key === 'string' ? event.key : '';
+        if (key.toLowerCase() !== 'enter') return;
+        const target = event?.target ?? null;
+        if (!target) return;
+        const descriptor = serializeElement(target);
+        send('keydown', descriptor, { key });
+      });
     },
     { bindingName: ACTION_BINDING_NAME, inputDebounce: INPUT_DEBOUNCE_MS },
   );
@@ -376,26 +388,6 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
   });
 
   const page = await context.newPage();
-  await recordNavigationEvent({
-    page,
-    screenshotsDir,
-    flowStream,
-    nextIndex: () => ++actionCounter,
-    url: options.baseUrl || 'about:blank',
-    title: 'Open page',
-  });
-
-  if (options.baseUrl) {
-    await page.goto(options.baseUrl, { waitUntil: 'load' });
-    await recordNavigationEvent({
-      page,
-      screenshotsDir,
-      flowStream,
-      nextIndex: () => ++actionCounter,
-      url: page.url(),
-      title: 'Navigate',
-    });
-  }
 
   const navigationListener = async (navigatedPage: Page, frameUrl: string) => {
     if (isStopping) return;
@@ -423,6 +415,10 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
   context.on('page', (newPage) => {
     attachNavigationHooks(newPage);
   });
+
+  if (options.baseUrl) {
+    await page.goto(options.baseUrl, { waitUntil: 'load' });
+  }
 
   async function stop() {
     if (isStopping) return;
@@ -457,7 +453,25 @@ async function handleRecordedAction({
   nextIndex,
 }: HandleRecordedActionOptions) {
   const actionIndex = nextIndex();
-  const screenshotFile = await captureActionScreenshot(page, screenshotsDir, actionIndex);
+  const delay = (() => {
+    switch (payload.kind) {
+      case 'input':
+        return 140;
+      case 'change':
+        return 160;
+      case 'submit':
+        return 220;
+      case 'keydown':
+        return 160;
+      case 'click':
+      default:
+        return 180;
+    }
+  })();
+
+  const screenshotFile = await captureActionScreenshot(page, screenshotsDir, actionIndex, {
+    delay,
+  });
 
   const entry: RecordedActionLogEntry = {
     ...payload,
@@ -486,7 +500,10 @@ async function recordNavigationEvent({
   title,
 }: NavigationRecordOptions) {
   const actionIndex = nextIndex();
-  const screenshotFile = await captureActionScreenshot(page, screenshotsDir, actionIndex);
+  const screenshotFile = await captureActionScreenshot(page, screenshotsDir, actionIndex, {
+    waitFor: 'load',
+    delay: 320,
+  });
 
   const entry: RecordedActionLogEntry = {
     kind: 'route',
@@ -501,10 +518,32 @@ async function recordNavigationEvent({
   await appendFlowEntry(flowStream, entry);
 }
 
-async function captureActionScreenshot(page: Page, screenshotsDir: string, index: number): Promise<string | null> {
+interface CaptureOptions {
+  waitFor?: 'load' | 'domcontentloaded' | 'networkidle' | null;
+  delay?: number;
+}
+
+async function captureActionScreenshot(
+  page: Page,
+  screenshotsDir: string,
+  index: number,
+  options: CaptureOptions = {},
+): Promise<string | null> {
   try {
-    await page.waitForLoadState('domcontentloaded', { timeout: 2000 }).catch(() => undefined);
-    await page.waitForTimeout(75);
+    if (page.isClosed()) return null;
+
+    const waitFor = options.waitFor;
+    if (waitFor) {
+      await page.waitForLoadState(waitFor, { timeout: 5000 }).catch(() => undefined);
+    } else {
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
+    }
+
+    const delay = options.delay ?? 150;
+    if (delay > 0) {
+      await page.waitForTimeout(delay).catch(() => undefined);
+    }
+
     await mkdir(screenshotsDir, { recursive: true });
     const filename = `step-${String(index).padStart(4, '0')}.png`;
     const filePath = join(screenshotsDir, filename);
