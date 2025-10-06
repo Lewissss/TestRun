@@ -115,10 +115,17 @@ async function buildStepsFromFlow({ flowLogPath, recordingId, fallbackScreens }:
     return buildStepsFromScreenshots(fallbackScreens);
   }
 
+  const filteredActions: RecordedActionLogEntry[] = [];
+  for (const action of actions) {
+    const prev = filteredActions.length ? filteredActions[filteredActions.length - 1] : null;
+    if (shouldSkipAction(action, prev)) continue;
+    filteredActions.push(action);
+  }
+
   const steps: StepInput[] = [];
   let fallbackIndex = 0;
 
-  for (const action of actions) {
+  for (const action of filteredActions) {
     const screenshot = resolveScreenshot(recordingId, action.screenshot, fallbackScreens, fallbackIndex);
     if (!action.screenshot && fallbackIndex < fallbackScreens.length) {
       fallbackIndex += 1;
@@ -163,6 +170,11 @@ async function buildStepsFromFlow({ flowLogPath, recordingId, fallbackScreens }:
 
     steps.push(step);
   }
+
+  steps.sort((a, b) => a.index - b.index);
+  steps.forEach((step, index) => {
+    step.index = index;
+  });
 
   return steps;
 }
@@ -227,9 +239,23 @@ function mapActionKindToStepType(action: RecordedActionLogEntry): StepType {
       return 'route';
     case 'submit':
       return 'submit';
-    case 'input':
-    case 'change':
+    case 'input': {
+      const kind = normalizeControlKind(action.descriptor, action.meta);
+      if (kind === 'select') return 'click';
+      if (kind === 'toggle') return 'click';
+      const inputType = typeof action.meta?.inputType === 'string' ? action.meta.inputType.toLowerCase() : '';
+      if (inputType && inputType !== 'inserttext' && !inputType.startsWith('delete')) {
+        return 'type';
+      }
       return 'type';
+    }
+    case 'change': {
+      const kind = normalizeControlKind(action.descriptor, action.meta);
+      if (kind === 'select' || kind === 'toggle') {
+        return 'click';
+      }
+      return 'type';
+    }
     case 'keydown':
       if (typeof action.meta === 'object' && action.meta && 'key' in action.meta) {
         const key = String((action.meta as Record<string, unknown>).key ?? '').toLowerCase();
@@ -361,6 +387,15 @@ function deriveCustomName(action: RecordedActionLogEntry, label: string | null):
       return `Submit ${safeLabel}`;
     case 'input':
     case 'change':
+      if (normalizeControlKind(action.descriptor, action.meta) === 'toggle') {
+        return `Toggle ${safeLabel}`;
+      }
+      if (normalizeControlKind(action.descriptor, action.meta) === 'select') {
+        if (truncatedValue) {
+          return `Select ${truncatedValue} on ${safeLabel}`;
+        }
+        return `Select option on ${safeLabel}`;
+      }
       if (truncatedValue) {
         return `Type ${truncatedValue} into ${safeLabel}`;
       }
@@ -386,7 +421,7 @@ function deriveParamHints(
   label: string | null,
   locator: LocatorDetails,
 ): ParameterHint[] | null {
-  if (action.kind !== 'input' && action.kind !== 'change') {
+  if (!['input', 'change', 'keydown'].includes(action.kind)) {
     return null;
   }
 
@@ -395,6 +430,10 @@ function deriveParamHints(
 
   const meta = (typeof action.meta === 'object' && action.meta !== null ? action.meta : {}) as Record<string, unknown>;
   const masked = Boolean(meta.masked);
+  const controlKind = normalizeControlKind(action.descriptor, action.meta);
+  if (controlKind === 'toggle' || controlKind === 'select') {
+    return null;
+  }
   const hintLabel = label ?? resolvedSelector;
   const inferred = inferParamName(hintLabel);
 
@@ -426,4 +465,100 @@ function inferParamName(source: string | null | undefined): string | undefined {
   if (!cleaned.length) return undefined;
   const [first, ...rest] = cleaned;
   return first + rest.map((token) => token.charAt(0).toUpperCase() + token.slice(1)).join('');
+}
+
+function shouldSkipAction(action: RecordedActionLogEntry, prev: RecordedActionLogEntry | null): boolean {
+  const controlKind = normalizeControlKind(action.descriptor, action.meta);
+
+  if (action.kind === 'input') {
+    const meta = normalizeMeta(action.meta);
+    if (isAutofillMeta(meta)) return true;
+    if (controlKind !== 'text') return true;
+    const inputType = String(meta.inputType ?? '').toLowerCase();
+    if (inputType && inputType !== 'inserttext' && !inputType.startsWith('delete')) {
+      return true;
+    }
+  }
+
+  if (action.kind === 'change') {
+    const meta = normalizeMeta(action.meta);
+    if (isAutofillMeta(meta)) return true;
+    if (controlKind === 'toggle') {
+      return true;
+    }
+    if (controlKind === 'select' && prev && descriptorsMatch(action.descriptor, prev.descriptor)) {
+      return true;
+    }
+  }
+
+  if (prev) {
+    const prevType = mapActionKindToStepType(prev);
+    const currentType = mapActionKindToStepType(action);
+    if (
+      prevType === currentType &&
+      descriptorsMatch(prev.descriptor, action.descriptor) &&
+      Math.abs((action.ts ?? 0) - (prev.ts ?? 0)) < 150
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function descriptorsMatch(a?: SerializedElement | null, b?: SerializedElement | null): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.selectorHints?.length && b.selectorHints?.length) {
+    return a.selectorHints.some((hint) => b.selectorHints?.includes(hint));
+  }
+  if (a.attributes?.id && b.attributes?.id) {
+    return a.attributes.id === b.attributes.id;
+  }
+  if (a.tagName && b.tagName) {
+    return a.tagName === b.tagName && a.trimmedText === b.trimmedText;
+  }
+  return false;
+}
+
+function isAutofillMeta(meta: Record<string, unknown> | null | undefined): boolean {
+  if (!meta) return false;
+  const keysToCheck = ['autofill', 'autoFill', 'isAutofill', 'isAutoFill', 'fromAutofill', 'autoFilled'];
+  for (const key of keysToCheck) {
+    if (typeof meta[key] === 'boolean' && meta[key]) {
+      return true;
+    }
+  }
+  const metaValues = Object.values(meta);
+  if (metaValues.some((value) => typeof value === 'string' && value.toLowerCase().includes('autofill'))) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeMeta(meta: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  if (meta && typeof meta === 'object') {
+    return meta;
+  }
+  return {};
+}
+
+function normalizeControlKind(
+  descriptor: SerializedElement | null | undefined,
+  meta: Record<string, unknown> | null | undefined,
+): 'text' | 'toggle' | 'select' | 'other' {
+  const tag = descriptor?.tagName?.toLowerCase?.() ?? '';
+  const inputType = String(meta?.inputType ?? descriptor?.attributes?.type ?? '').toLowerCase();
+  if (tag === 'select') return 'select';
+  if (tag === 'textarea') return 'text';
+  if (tag === 'input') {
+    if (['checkbox', 'radio'].includes(inputType)) {
+      return 'toggle';
+    }
+    if (['color', 'range', 'file'].includes(inputType)) {
+      return 'other';
+    }
+    return 'text';
+  }
+  return 'other';
 }

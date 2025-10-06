@@ -8,7 +8,6 @@ import type { WriteStream } from 'node:fs';
 
 const ACTION_BINDING_NAME = '__testrun_recordAction';
 const INPUT_DEBOUNCE_MS = 250;
-
 export type RecordedActionKind =
   | 'route'
   | 'click'
@@ -84,6 +83,8 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
   let actionCounter = 0;
   let isStopping = false;
 
+  const consumeActionIndex = () => actionCounter++;
+
   await context.exposeBinding(
     ACTION_BINDING_NAME,
     async (source, payload: RawActionPayload | null | undefined) => {
@@ -97,7 +98,7 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
           payload,
           screenshotsDir,
           flowStream,
-          nextIndex: () => ++actionCounter,
+          nextIndex: consumeActionIndex,
         });
       };
 
@@ -112,10 +113,127 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
     ({ bindingName, inputDebounce }) => {
       const globalObj: any = globalThis as any;
       const pendingInputs = new Map<string, any>();
-      const doc: any = globalObj?.document;
+      const elementIds = new WeakMap<any, string>();
 
-      if (!doc) {
-        return;
+      const OVERLAY_ID = '__testrun_recorder_overlay';
+      const OVERLAY_STYLE_ID = '__testrun_recorder_overlay_style';
+      const MIN_VISIBLE_MS = 2000;
+
+      const ensureOverlayStyle = () => {
+        const doc = globalObj.document;
+        if (!doc) return;
+        if (doc.getElementById(OVERLAY_STYLE_ID)) return;
+        const style = doc.createElement('style');
+        style.id = OVERLAY_STYLE_ID;
+        style.textContent = `
+          #${OVERLAY_ID} {
+            position: fixed;
+            inset: 0;
+            background: rgba(9, 12, 20, 0.72);
+            z-index: 2147483646;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #f8fafc;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 15px;
+            letter-spacing: 0.02em;
+            backdrop-filter: blur(6px);
+            transition: opacity 160ms ease;
+            pointer-events: all;
+          }
+          #${OVERLAY_ID}[data-state='hidden'] {
+            opacity: 0;
+            pointer-events: none;
+          }
+          #${OVERLAY_ID} .testrun-recorder-overlay__inner {
+            padding: 18px 28px;
+            border-radius: 12px;
+            background: rgba(15, 18, 30, 0.88);
+            box-shadow: 0 18px 48px rgba(5, 8, 20, 0.45);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+          }
+          #${OVERLAY_ID} .testrun-recorder-overlay__spinner {
+            width: 16px;
+            height: 16px;
+            border-radius: 999px;
+            border: 2px solid rgba(255, 255, 255, 0.35);
+            border-top-color: #5eead4;
+            animation: __testrun_spin 1s linear infinite;
+          }
+          @keyframes __testrun_spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        `;
+        (doc.head ?? doc.documentElement).appendChild(style);
+      };
+
+      const showOverlay = () => {
+        const doc = globalObj.document;
+        if (!doc || !doc.documentElement) return;
+        const currentHref = typeof globalObj.location?.href === 'string' ? globalObj.location.href : '';
+        if (!currentHref || currentHref === 'about:blank') {
+          return;
+        }
+        ensureOverlayStyle();
+        let overlay = doc.getElementById(OVERLAY_ID);
+        if (!overlay) {
+          overlay = doc.createElement('div');
+          overlay.id = OVERLAY_ID;
+          overlay.innerHTML = `
+            <div class="testrun-recorder-overlay__inner">
+              <span class="testrun-recorder-overlay__spinner"></span>
+              <span>Preparing recorder…</span>
+            </div>
+          `;
+          (doc.body ?? doc.documentElement).appendChild(overlay);
+        }
+        overlay.setAttribute('data-state', 'visible');
+        overlay.style.opacity = '1';
+        overlay.style.pointerEvents = 'all';
+        overlay.setAttribute('data-created-at', String(Date.now()));
+      };
+
+      const hideOverlay = () => {
+        const doc = globalObj.document;
+        if (!doc) return;
+        const overlay = doc.getElementById(OVERLAY_ID);
+        if (!overlay) return;
+        const createdAt = Number(overlay.getAttribute('data-created-at') ?? '0');
+        const elapsed = Date.now() - createdAt;
+        const remaining = Math.max(0, MIN_VISIBLE_MS - elapsed);
+        const performHide = () => {
+          overlay.setAttribute('data-state', 'hidden');
+          overlay.style.pointerEvents = 'none';
+          globalObj.setTimeout(() => {
+            if (overlay.parentNode) {
+              overlay.parentNode.removeChild(overlay);
+            }
+          }, 220);
+        };
+        if (remaining > 0) {
+          overlay.style.pointerEvents = 'all';
+          globalObj.setTimeout(performHide, remaining);
+        } else {
+          performHide();
+        }
+      };
+
+      const readyEventName = '__testrun-recorder-ready';
+
+      const attachOverlayGuards = () => {
+        showOverlay();
+        globalObj.addEventListener(readyEventName, hideOverlay, { once: false });
+        globalObj.addEventListener('load', hideOverlay, { once: false });
+      };
+
+      if (globalObj.document?.readyState === 'loading') {
+        globalObj.addEventListener('DOMContentLoaded', attachOverlayGuards, { once: true });
+      } else {
+        attachOverlayGuards();
       }
 
       const send = (
@@ -143,13 +261,13 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
 
       const getElementKey = (element: any) => {
         if (!element) return `${Date.now()}-${Math.random()}`;
-        const existing = element.__testrunElementId;
-        if (existing) return existing as string;
+        const existing = elementIds.get(element);
+        if (existing) return existing;
         const assigned =
           typeof globalObj?.crypto?.randomUUID === 'function'
             ? globalObj.crypto.randomUUID()
             : `${Date.now()}-${Math.random()}`;
-        element.__testrunElementId = assigned;
+        elementIds.set(element, assigned);
         return assigned;
       };
 
@@ -208,11 +326,13 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
         if (!name) {
           const labelledBy = getAttribute('aria-labelledby');
           if (labelledBy && typeof labelledBy === 'string') {
+            const docRef = globalObj.document;
             const candidates = labelledBy
               .split(/\s+/)
               .map((id) => {
-                const node = typeof doc.getElementById === 'function' ? doc.getElementById(id) : null;
-                return node && typeof node.innerText === 'string' ? node.innerText.trim() : null;
+                if (!docRef || typeof docRef.getElementById !== 'function') return null;
+                const node = docRef.getElementById(id);
+                return node && typeof (node as any).innerText === 'string' ? (node as any).innerText.trim() : null;
               })
               .filter((value): value is string => Boolean(value));
             if (candidates.length) {
@@ -280,102 +400,122 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
         return Boolean(textualInputTypes[type]);
       };
 
-      const resolveClickableTarget = (node: any): any => {
-        if (!node || typeof node !== 'object') return node;
-        if (typeof node.closest === 'function') {
-          const labelledControl = node.closest('label');
-          if (labelledControl && typeof labelledControl.querySelector === 'function') {
-            const control = labelledControl.querySelector('input,select,textarea,button');
-            if (control) return control;
+      const interactiveTags = new Set(['input', 'button', 'select', 'textarea', 'a']);
+
+      const asElement = (value: any) =>
+        value && typeof value === 'object' && typeof value.tagName === 'string' ? value : null;
+
+      const resolveInteractiveTarget = (event: any): any => {
+        if (!event) return null;
+        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        for (const entry of path) {
+          const element = asElement(entry);
+          if (!element) continue;
+          const tag = element.tagName.toLowerCase();
+          if (interactiveTags.has(tag)) return element;
+          if (tag === 'label' && element.control) return element.control;
+        }
+
+        const rawTarget = asElement(event.target);
+        if (rawTarget) {
+          const tag = rawTarget.tagName.toLowerCase();
+          if (interactiveTags.has(tag)) return rawTarget;
+          if (tag === 'label' && rawTarget.control) return rawTarget.control;
+          if (typeof rawTarget.closest === 'function') {
+            const relatedLabel = rawTarget.closest('label');
+            if (relatedLabel && relatedLabel.control) return relatedLabel.control;
           }
         }
-        const tag = typeof node.tagName === 'string' ? node.tagName.toLowerCase() : '';
-        if (tag === 'input' || tag === 'button' || tag === 'a' || tag === 'select' || tag === 'textarea') {
-          return node;
-        }
-        if (typeof node.querySelector === 'function') {
-          const candidate = node.querySelector('input,button,select,textarea,a');
-          if (candidate) return candidate;
-        }
-        if (node.firstElementChild) {
-          let child = node.firstElementChild as any;
-          while (child) {
-            const resolved = resolveClickableTarget(child);
-            if (resolved) return resolved;
-            child = child.nextElementSibling;
-          }
-        }
-        return node;
+
+        return event.target ?? null;
       };
 
-      doc.addEventListener('click', (event: any) => {
-        const rawTarget = event?.target ?? null;
-        if (!rawTarget) return;
-        const target = resolveClickableTarget(rawTarget);
-        if (!target) return;
-        const descriptor = serializeElement(target);
-        send('click', descriptor, {
-          button: typeof event?.button === 'number' ? event.button : 0,
-          detail: typeof event?.detail === 'number' ? event.detail : 0,
-          clientX: typeof event?.clientX === 'number' ? event.clientX : null,
-          clientY: typeof event?.clientY === 'number' ? event.clientY : null,
-        });
-      });
-
-      doc.addEventListener('change', (event: any) => {
-        const target = event?.target ?? null;
-        if (!target) return;
-        const descriptor = serializeElement(target);
-        let meta: Record<string, unknown> | undefined;
-        if (isTextualInput(target)) {
-          const value = typeof target.value === 'string' ? target.value : '';
-          const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
-          meta = {
-            value,
-            length: value.length,
-            masked: type === 'password',
-          };
-        }
-        send('change', descriptor, meta);
-      });
-
-      doc.addEventListener('input', (event: any) => {
-        const target = event?.target ?? null;
-        if (!isTextualInput(target)) return;
-        const descriptor = serializeElement(target);
-        const value = typeof target.value === 'string' ? target.value : '';
-        const key = getElementKey(target);
-        const existing = pendingInputs.get(key);
-        if (existing) globalObj.clearTimeout(existing);
-        const timer = globalObj.setTimeout(() => {
-          pendingInputs.delete(key);
-          const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
-          const inputType = typeof event?.inputType === 'string' ? event.inputType : null;
-          send('input', descriptor, {
-            value,
-            length: value.length,
-            masked: type === 'password',
-            inputType,
+      globalObj.addEventListener(
+        'click',
+        (event: any) => {
+          const target = resolveInteractiveTarget(event);
+          if (!target) return;
+          const descriptor = serializeElement(target);
+          send('click', descriptor, {
+            button: typeof event?.button === 'number' ? event.button : 0,
+            detail: typeof event?.detail === 'number' ? event.detail : 0,
+            clientX: typeof event?.clientX === 'number' ? event.clientX : null,
+            clientY: typeof event?.clientY === 'number' ? event.clientY : null,
           });
-        }, inputDebounce);
-        pendingInputs.set(key, timer);
-      });
+        },
+        { passive: true },
+      );
 
-      doc.addEventListener('submit', (event: any) => {
-        const target = event?.target ?? null;
-        if (!target) return;
-        const descriptor = serializeElement(target);
-        send('submit', descriptor, {});
-      });
+      globalObj.addEventListener(
+        'change',
+        (event: any) => {
+          const target = resolveInteractiveTarget(event);
+          if (!target) return;
+          const descriptor = serializeElement(target);
+          let meta: Record<string, unknown> | undefined;
+          if (isTextualInput(target)) {
+            const value = typeof target.value === 'string' ? target.value : '';
+            const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
+            meta = {
+              value,
+              length: value.length,
+              masked: type === 'password',
+            };
+          }
+          send('change', descriptor, meta);
+        },
+        { passive: true },
+      );
 
-      doc.addEventListener('keydown', (event: any) => {
-        const key = typeof event?.key === 'string' ? event.key : '';
-        if (key.toLowerCase() !== 'enter') return;
-        const target = event?.target ?? null;
-        if (!target) return;
-        const descriptor = serializeElement(target);
-        send('keydown', descriptor, { key });
-      });
+      globalObj.addEventListener(
+        'input',
+        (event: any) => {
+          const target = resolveInteractiveTarget(event);
+          if (!isTextualInput(target)) return;
+          const descriptor = serializeElement(target);
+          const value = typeof target.value === 'string' ? target.value : '';
+          const key = getElementKey(target);
+          const existing = pendingInputs.get(key);
+          if (existing) globalObj.clearTimeout(existing);
+          const timer = globalObj.setTimeout(() => {
+            pendingInputs.delete(key);
+            const type = typeof target.type === 'string' ? target.type.toLowerCase() : '';
+            const inputType = typeof event?.inputType === 'string' ? event.inputType : null;
+            send('input', descriptor, {
+              value,
+              length: value.length,
+              masked: type === 'password',
+              inputType,
+            });
+          }, inputDebounce);
+          pendingInputs.set(key, timer);
+        },
+        { passive: true },
+      );
+
+      globalObj.addEventListener(
+        'submit',
+        (event: any) => {
+          const target = resolveInteractiveTarget(event);
+          if (!target) return;
+          const descriptor = serializeElement(target);
+          send('submit', descriptor, {});
+        },
+        { passive: true },
+      );
+
+      globalObj.addEventListener(
+        'keydown',
+        (event: any) => {
+          const key = typeof event?.key === 'string' ? event.key : '';
+          if (key.toLowerCase() !== 'enter') return;
+          const target = resolveInteractiveTarget(event);
+          if (!target) return;
+          const descriptor = serializeElement(target);
+          send('keydown', descriptor, { key });
+        },
+        { passive: true },
+      );
     },
     { bindingName: ACTION_BINDING_NAME, inputDebounce: INPUT_DEBOUNCE_MS },
   );
@@ -389,35 +529,23 @@ export async function startRecording(options: RecorderOptions): Promise<Recorder
 
   const page = await context.newPage();
 
-  const navigationListener = async (navigatedPage: Page, frameUrl: string) => {
-    if (isStopping) return;
-    lastActionChain = lastActionChain.then(() =>
-      recordNavigationEvent({
-        page: navigatedPage,
-        screenshotsDir,
-        flowStream,
-        nextIndex: () => ++actionCounter,
-        url: frameUrl,
-        title: 'Navigate',
-      }),
-    );
-  };
-
-  const attachNavigationHooks = (targetPage: Page) => {
-    targetPage.on('framenavigated', (frame) => {
-      if (frame !== targetPage.mainFrame()) return;
-      if (!frame.url() || frame.url() === 'about:blank') return;
-      void navigationListener(targetPage, frame.url());
-    });
-  };
-
-  attachNavigationHooks(page);
-  context.on('page', (newPage) => {
-    attachNavigationHooks(newPage);
-  });
-
   if (options.baseUrl) {
     await page.goto(options.baseUrl, { waitUntil: 'load' });
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
+    await page.waitForTimeout(200).catch(() => undefined);
+    await recordNavigationEvent({
+      page,
+      screenshotsDir,
+      flowStream,
+      nextIndex: consumeActionIndex,
+      url: page.url(),
+      title: 'Initial load',
+      captureOptions: { waitFor: null, delay: 200 },
+    });
+    await markPageReady(page);
+    await page.waitForTimeout(80).catch(() => undefined);
+  } else {
+    await markPageReady(page);
   }
 
   async function stop() {
@@ -489,6 +617,8 @@ interface NavigationRecordOptions {
   nextIndex: () => number;
   url: string;
   title: string;
+  captureOptions?: CaptureOptions;
+  originActionIndex?: number;
 }
 
 async function recordNavigationEvent({
@@ -498,19 +628,26 @@ async function recordNavigationEvent({
   nextIndex,
   url,
   title,
+  captureOptions,
+  originActionIndex,
 }: NavigationRecordOptions) {
   const actionIndex = nextIndex();
-  const screenshotFile = await captureActionScreenshot(page, screenshotsDir, actionIndex, {
-    waitFor: 'load',
-    delay: 320,
-  });
+  const screenshotFile = await captureActionScreenshot(
+    page,
+    screenshotsDir,
+    actionIndex,
+    captureOptions ?? { waitFor: 'load', delay: 320 },
+  );
 
   const entry: RecordedActionLogEntry = {
     kind: 'route',
     ts: Date.now(),
     pageUrl: url,
     descriptor: null,
-    meta: { title },
+    meta: {
+      title,
+      ...(typeof originActionIndex === 'number' ? { originActionIndex } : {}),
+    },
     actionIndex,
     screenshot: screenshotFile ? joinRelativePaths('screenshots', screenshotFile) : null,
   };
@@ -533,7 +670,9 @@ async function captureActionScreenshot(
     if (page.isClosed()) return null;
 
     const waitFor = options.waitFor;
-    if (waitFor) {
+    if (waitFor === null) {
+      // no-op, caller already awaited desired state
+    } else if (waitFor) {
       await page.waitForLoadState(waitFor, { timeout: 5000 }).catch(() => undefined);
     } else {
       await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => undefined);
@@ -566,4 +705,20 @@ async function appendFlowEntry(stream: WriteStream, entry: RecordedActionLogEntr
 
 function joinRelativePaths(base: string, filename: string): string {
   return `${base}/${filename}`;
+}
+
+async function markPageReady(page: Page) {
+  try {
+    await page.evaluate(() => {
+      const target = globalThis as any;
+      if (typeof target?.dispatchEvent === 'function') {
+        const EventCtor = target.Event || target.CustomEvent;
+        if (EventCtor) {
+          target.dispatchEvent(new EventCtor('__testrun-recorder-ready'));
+        }
+      }
+    });
+  } catch (error) {
+    console.debug('Recorder ready event dispatch skipped', error);
+  }
 }
