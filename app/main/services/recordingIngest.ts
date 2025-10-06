@@ -149,6 +149,9 @@ async function buildStepsFromFlow({ flowLogPath, recordingId, fallbackScreens }:
           if (hint.inferredName) {
             payload.inferredName = hint.inferredName;
           }
+          if (hint.sampleValue) {
+            payload.sampleValue = hint.sampleValue;
+          }
           return payload;
         }) as unknown as Prisma.JsonValue)
       : null;
@@ -436,6 +439,7 @@ function deriveParamHints(
   }
   const hintLabel = label ?? resolvedSelector;
   const inferred = inferParamName(hintLabel);
+  const rawValue = typeof meta.value === 'string' ? meta.value : undefined;
 
   const hint: ParameterHint = {
     kind: masked ? 'secret' : 'text',
@@ -449,6 +453,10 @@ function deriveParamHints(
 
   if (inferred) {
     hint.inferredName = inferred;
+  }
+
+  if (!masked && rawValue) {
+    hint.sampleValue = rawValue;
   }
 
   return [hint];

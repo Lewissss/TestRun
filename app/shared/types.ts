@@ -39,6 +39,7 @@ export interface ParameterHint {
   selector: string;
   mask?: boolean;
   inferredName?: string;
+  sampleValue?: string;
 }
 
 export interface StepTemplate {

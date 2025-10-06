@@ -11,6 +11,7 @@ yarn.lock
 
 # Electron / Playwright runtime data
 /data/
+/tests
 /appdata/
 /tests/**/__screenshots__/
 /tests/**/test-results/

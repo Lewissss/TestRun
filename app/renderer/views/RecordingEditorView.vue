@@ -50,6 +50,9 @@
             <span v-if="!aiEnabled">Enable AI in Settings → LLM.</span>
             <span v-else>Generate descriptive labels for each step.</span>
           </n-tooltip>
+          <n-button type="primary" ghost size="small" @click="openComposeModal">
+            Generate Test
+          </n-button>
           <n-button type="primary">Open Trace</n-button>
         </div>
       </header>
@@ -72,25 +75,54 @@
         </div>
       </div>
     </section>
+    <n-modal v-model:show="composeModalVisible" preset="card" title="Generate Test" :mask-closable="!composeLoading">
+      <n-form label-placement="top" :show-feedback="false" class="space-y-3">
+        <n-form-item label="Test Title">
+          <n-input v-model:value="composeForm.title" placeholder="Enter test title" :disabled="composeLoading" />
+        </n-form-item>
+        <n-form-item label="Include Screenshots">
+          <n-switch v-model:value="composeForm.includeScreenshots" :disabled="composeLoading" />
+        </n-form-item>
+        <n-form-item label="Tags">
+          <TagInput v-model:model-value="composeForm.tagNames" :disabled="composeLoading" />
+        </n-form-item>
+      </n-form>
+      <template #action>
+        <div class="flex justify-end gap-2">
+          <n-button quaternary :disabled="composeLoading" @click="closeComposeModal">Cancel</n-button>
+          <n-button type="primary" :loading="composeLoading" @click="handleComposeConfirm">Generate</n-button>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, watchEffect } from 'vue';
+import { computed, reactive, ref, watch, watchEffect } from 'vue';
 import { useMessage } from 'naive-ui';
 import StepCard from '@renderer/components/StepCard.vue';
+import TagInput from '@renderer/components/TagInput.vue';
 import { useRecordingsStore } from '@renderer/stores/recordings';
 import { useAiStore } from '@renderer/stores/ai';
 import { useRoute, useRouter } from 'vue-router';
+import { useTestsStore } from '@renderer/stores/tests';
 
 const recordings = useRecordingsStore();
 const aiStore = useAiStore();
 const message = useMessage();
 const route = useRoute();
 const router = useRouter();
+const testsStore = useTestsStore();
 
 const selectedStepId = ref<string | null>(null);
 const selectedScreenshot = ref<string | null>(null);
+const composeModalVisible = ref(false);
+const composeLoading = ref(false);
+const composeForm = reactive({
+  title: '',
+  includeScreenshots: true,
+  tagNames: [] as string[],
+});
 
 watchEffect(() => {
   const id = route.params.id as string | undefined;
@@ -165,6 +197,50 @@ function saveAsBlock(step: unknown) {
 
 function toggleParameter(step: unknown) {
   console.debug('Toggle param editing', step);
+}
+
+function openComposeModal() {
+  const recording = recordings.activeRecording;
+  if (!recording) {
+    message.warning('No recording loaded.');
+    return;
+  }
+  composeForm.title = `${recording.name ?? 'Recording'} Test`;
+  composeForm.includeScreenshots = true;
+  composeForm.tagNames = Array.isArray(recording.tags) ? recording.tags.map((tag) => tag.name) : [];
+  composeModalVisible.value = true;
+}
+
+function closeComposeModal() {
+  if (composeLoading.value) return;
+  composeModalVisible.value = false;
+}
+
+async function handleComposeConfirm() {
+  const recording = recordings.activeRecording;
+  if (!recording) {
+    message.warning('No recording loaded.');
+    return;
+  }
+  composeLoading.value = true;
+  try {
+    const response = await testsStore.createTestFromRecording({
+      recordingId: recording.id,
+      title: composeForm.title,
+      includeScreenshots: composeForm.includeScreenshots,
+      tagNames: Array.from(composeForm.tagNames),
+    });
+    composeModalVisible.value = false;
+    message.success('Test generated from recording.');
+    if (response?.testId) {
+      router.push({ name: 'composer', query: { highlight: response.testId } });
+    }
+  } catch (error) {
+    console.error('Failed to generate test from recording', error);
+    message.error('Could not generate test from recording.');
+  } finally {
+    composeLoading.value = false;
+  }
 }
 
 async function repairSelector(step: any) {

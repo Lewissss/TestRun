@@ -25,6 +25,16 @@ export interface ComposeTestPayload {
   environmentId?: string;
 }
 
+export interface ComposeRecordingPayload {
+  recordingId: string;
+  title?: string;
+  blockTitle?: string;
+  includeScreenshots?: boolean;
+  tagNames?: string[];
+  datasetId?: string;
+  environmentId?: string;
+}
+
 export const useTestsStore = defineStore('tests', {
   state: (): TestsState => ({
     items: [],
@@ -59,6 +69,11 @@ export const useTestsStore = defineStore('tests', {
       const result = await window.api.invoke('test.compose', payload);
       await this.fetchTests();
       return result;
+    },
+    async createTestFromRecording(payload: ComposeRecordingPayload) {
+      const result = await window.api.invoke('recording.composeTest', payload);
+      await this.fetchTests();
+      return result as { testId: string; filePath: string; snapshotDir: string; blockId: string; blockVersion: number };
     },
   },
 });

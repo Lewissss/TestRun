@@ -32,6 +32,7 @@ import {
   deleteApiSession,
   getEnvironmentById,
 } from './db/repositories';
+import { convertRecordingToTest } from './services/recordingComposer';
 import type {
   ApiBlockInput,
   ApiBlockPatch,
@@ -158,6 +159,15 @@ const recordingStartSchema = z
 
 const recordingStopSchema = z.object({ sessionId: z.string() });
 const recordingScreenshotSchema = z.object({ path: z.string().min(1) });
+const recordingComposeSchema = z.object({
+  recordingId: z.string().min(1),
+  title: z.string().min(1).optional(),
+  blockTitle: z.string().min(1).optional(),
+  includeScreenshots: z.boolean().optional(),
+  tagNames: z.array(z.string()).optional(),
+  datasetId: z.string().optional(),
+  environmentId: z.string().optional(),
+});
 
 const stepSchema = z.object({
   id: z.string(),
@@ -286,6 +296,20 @@ ipcMain.handle('recording.screenshot', async (_event, payload) => {
   const ext = basename(absolute).split('.').pop()?.toLowerCase();
   const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
   return `data:${mime};base64,${buffer.toString('base64')}`;
+});
+
+ipcMain.handle('recording.composeTest', async (_event, payload) => {
+  const data = recordingComposeSchema.parse(payload);
+  const result = await convertRecordingToTest({
+    recordingId: data.recordingId,
+    testTitle: data.title,
+    blockTitle: data.blockTitle,
+    includeScreenshots: data.includeScreenshots,
+    tagNames: data.tagNames,
+    datasetId: data.datasetId,
+    environmentId: data.environmentId,
+  });
+  return result;
 });
 
 ipcMain.handle('block.list', async (_event, payload) => {
