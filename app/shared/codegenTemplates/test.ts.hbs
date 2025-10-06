@@ -1,0 +1,62 @@
+import { test, request as playwrightRequest } from '@playwright/test';
+import { resolveBindings } from '../../app/shared/runtime/bindings';
+{{#each entries}}import { {{functionName}} } from '{{importPath}}';
+{{/each}}
+
+const TEST_ID = '{{testId}}';
+const datasetBindings = {{#if datasetLiteral}}{{datasetLiteral}}{{else}}undefined{{/if}};
+const environmentVariables = {{#if environmentLiteral}}{{environmentLiteral}}{{else}}undefined{{/if}};
+
+{{#if hasApiEntries}}
+const BASE_URL = '{{baseUrl}}';
+{{/if}}
+
+test.describe(TEST_ID, () => {
+  test(`${TEST_ID} - {{title}}`, async ({ page }, testInfo) => {
+    const ctx: Record<string, unknown> = {};
+    const variableScope: Record<string, unknown> = environmentVariables ? { ...environmentVariables } : {};
+    const dataset = datasetBindings;
+    {{#if hasApiEntries}}
+    const apiContext = await playwrightRequest.newContext({ baseURL: BASE_URL || undefined });
+    try {
+    {{/if}}
+      {{#if hasUiEntries}}
+      if ('goto' in page && typeof page.goto === 'function') {
+        await page.goto('{{baseUrl}}');
+      }
+      {{/if}}
+      {{#each entries}}
+      {
+        const bindings = resolveBindings({{bindingsLiteral}}, {
+          dataset,
+          variables: variableScope,
+        });
+        {{#if isApi}}
+        const result = await {{functionName}}(apiContext, bindings as any, ctx, testInfo);
+        if (result?.captures) {
+          Object.assign(variableScope, result.captures);
+        }
+        if (Array.isArray(result?.logs)) {
+          for (let logIndex = 0; logIndex < result.logs.length; logIndex += 1) {
+            const log = result.logs[logIndex];
+            await testInfo.attach(`api-${@index + 1}-step-${logIndex + 1}`, {
+              body: Buffer.from(JSON.stringify(log, null, 2), 'utf8'),
+              contentType: 'application/json',
+            });
+          }
+        }
+        if (result?.error) {
+          throw result.error;
+        }
+        {{else}}
+        await {{functionName}}(page, bindings as any);
+        {{/if}}
+      }
+      {{/each}}
+    {{#if hasApiEntries}}
+    } finally {
+      await apiContext.dispose();
+    }
+    {{/if}}
+  });
+});

@@ -1,0 +1,19 @@
+import { APIRequestContext, expect, TestInfo } from '@playwright/test';
+import { executeApiActions } from '../../app/shared/runtime/api';
+
+export interface {{functionName}}Params {
+{{#if params}}
+{{#each params}}  {{name}}{{#unless required}}?{{/unless}}: {{type}};
+{{/each}}{{else}}  // No parameters
+{{/if}}
+}
+
+export async function {{functionName}}(
+  request: APIRequestContext,
+  params: {{functionName}}Params,
+  ctx: Record<string, unknown>,
+  testInfo: TestInfo,
+): Promise<{ captures: Record<string, unknown>; logs: unknown[] }> {
+  const actions = {{actionsLiteral}};
+  return executeApiActions(actions, { request, expect, params, ctx, testInfo });
+}

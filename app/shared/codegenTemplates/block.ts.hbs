@@ -1,0 +1,13 @@
+import { expect, Page } from '@playwright/test';
+
+export interface {{functionName}}Params {
+{{#if params}}
+{{#each params}}  {{name}}{{#unless required}}?{{/unless}}: {{type}};
+{{/each}}{{else}}  // No parameters
+{{/if}}
+}
+
+export async function {{functionName}}(page: Page, params: {{functionName}}Params): Promise<void> {
+{{#each statements}}  {{this}}
+{{/each}}
+}
